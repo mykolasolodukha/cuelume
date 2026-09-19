@@ -17,10 +17,10 @@
   "author": "Daniel Belyi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Danilaa1/cuelume.git"
+    "url": "git+https://github.com/danielwh2/cuelume.git"
   },
   "bugs": {
-    "url": "https://github.com/Danilaa1/cuelume/issues"
+    "url": "https://github.com/danielwh2/cuelume/issues"
   },
   "type": "module",
   "sideEffects": false,
