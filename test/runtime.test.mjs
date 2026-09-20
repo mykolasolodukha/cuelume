@@ -680,3 +680,53 @@ test("a cue whose resume settles long after it was asked for is dropped", async 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(renders(), 1);
 });
+
+test("a play blocked before activation starts the context on the first tap that counts", async (context) => {
+  context.after(restoreGlobals);
+  let constructions = 0;
+  let resumes = 0;
+  const userActivation = { hasBeenActive: false };
+
+  class LateStartContext {
+    state = "suspended";
+    constructor() {
+      constructions++;
+    }
+    resume() {
+      resumes++;
+      this.state = "running";
+      return Promise.resolve();
+    }
+    createGain() {
+      throw new Error("nothing should render");
+    }
+  }
+
+  const win = fakeWindow(LateStartContext);
+  setGlobal("navigator", { userActivation });
+  setGlobal("window", win);
+  const { play } = await import(`../dist/audio/engine.js?blocked=${Date.now()}`);
+
+  // A swipe's cue: no activation yet, so no context — but the engine now waits.
+  play("page");
+  assert.equal(constructions, 0);
+  assert.deepEqual([...win.listeners.keys()].sort(), ["click", "keydown", "mousedown", "touchend"]);
+
+  // The swipe's own touchend grants nothing on iOS: keep waiting.
+  win.emit("touchend");
+  assert.equal(constructions, 0);
+  assert.equal(win.listeners.size, 4);
+
+  // A tap anywhere does, even one that plays no cue of its own.
+  userActivation.hasBeenActive = true;
+  win.emit("touchend");
+  assert.equal(constructions, 1);
+  assert.equal(resumes, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(win.listeners.size, 0);
+
+  // The dropped cue stays dropped; the next one renders straight away.
+  win.emit("click");
+  assert.equal(constructions, 1);
+  assert.equal(resumes, 1);
+});
