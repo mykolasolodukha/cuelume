@@ -22,7 +22,8 @@ export declare function play(sound?: SoundName, options?: {
 }): void;
 /**
  * Creates and starts the shared `AudioContext` without playing anything.
- * Call it from a gesture handler (`click`, `touchend`, `keydown`) when the
+ * Call it from a gesture handler (`click`, `touchend`, `keydown`,
+ * `mousedown`) when the
  * first cue of a visit will come from somewhere the browser does not treat
  * as a gesture: a drag library's pointer callbacks, a frame callback, the
  * continuation after an `await`. Behind the same gates as `play()`: a no-op
