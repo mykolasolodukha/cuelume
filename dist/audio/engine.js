@@ -145,35 +145,55 @@ export function setVolume(value) {
     globalVolume = normalizeVolume(value, globalVolume);
 }
 /**
- * Retries a blocked start on the next gesture the browser honours.
+ * Gets audio started on the next gesture the browser honours.
  *
- * WebKit starts a context only while `resume()` runs on the call stack of a
- * `touchend`, `click` or `keydown`. A cue played from a pointer event
- * listener, a frame callback or after an `await` leaves its `resume()`
- * pending, and every later `play()` inherits that silence. One set of
- * passive capture listeners on `window` calls `resume()` again on the next
- * honoured gesture; the browser then settles the pending promises, so the
- * cues queued behind them render, and the listeners leave once the context
+ * WebKit grants a page user activation only for a touch that ends as a tap,
+ * never for a pan, and starts a context only while `resume()` runs on the
+ * call stack of a `touchend`, `click` or `keydown`. So a first cue played
+ * from a swipe never passes the activation gate, and one played from a
+ * pointer event listener, a frame callback or after an `await` leaves its
+ * `resume()` pending; every later `play()` inherits that silence.
+ *
+ * Once `play()` or `prime()` has been blocked either way, one set of
+ * passive capture listeners on `window` waits for the next honoured
+ * gesture, creates the shared context there if it does not exist yet, and
+ * calls `resume()` on that stack. Any pending promises then settle and the
+ * cues queued behind them render. The listeners leave once the context
  * runs.
  */
-function armUnlock(context) {
+function armUnlock() {
     if (disarmUnlock || typeof window === "undefined")
         return;
     if (typeof window.addEventListener !== "function")
         return;
+    let watched = null;
     const disarm = () => {
         disarmUnlock = null;
         for (const type of UNLOCK_EVENTS)
             window.removeEventListener(type, unlock, true);
-        if (typeof context.removeEventListener === "function") {
-            context.removeEventListener("statechange", settle);
+        if (watched && typeof watched.removeEventListener === "function") {
+            watched.removeEventListener("statechange", settle);
         }
     };
     const settle = () => {
-        if (context.state === "running")
+        if (watched?.state === "running")
             disarm();
     };
+    const watch = (context) => {
+        if (watched)
+            return;
+        watched = context;
+        if (typeof context.addEventListener === "function") {
+            context.addEventListener("statechange", settle);
+        }
+    };
     const unlock = () => {
+        if (!enabled || !userHasBeenActive())
+            return;
+        const context = getAudioContext();
+        if (!context)
+            return;
+        watch(context);
         if (context.state === "running") {
             disarm();
             return;
@@ -181,9 +201,8 @@ function armUnlock(context) {
         tryResume(context, settle);
     };
     disarmUnlock = disarm;
-    if (typeof context.addEventListener === "function") {
-        context.addEventListener("statechange", settle);
-    }
+    if (sharedContext)
+        watch(sharedContext);
     for (const type of UNLOCK_EVENTS) {
         window.addEventListener(type, unlock, { capture: true, passive: true });
     }
@@ -222,14 +241,18 @@ function getAudioContext() {
 /**
  * Plays a sound immediately. Safe to call from anywhere — lazily creates
  * the shared `AudioContext` on first use, resumes it if the browser
- * started it suspended (e.g. before any user gesture), and is a no-op
- * when Web Audio is unavailable (SSR, old browsers).
+ * started it suspended, and is a no-op when Web Audio is unavailable
+ * (SSR, old browsers). A call the browser blocks — before the first user
+ * activation, or off a gesture's call stack — plays nothing but gets the
+ * context started on the next gesture that counts, so later cues play.
  */
 export function play(sound = "chime", options) {
     if (!enabled || !isSoundName(sound))
         return;
-    if (!userHasBeenActive())
+    if (!userHasBeenActive()) {
+        armUnlock();
         return;
+    }
     const playVolume = globalVolume * normalizeVolume(options?.volume, 1);
     if (playVolume === 0)
         return;
@@ -249,7 +272,7 @@ export function play(sound = "chime", options) {
                 return;
             renderRecipe(context, recipe, playVolume);
         });
-        armUnlock(context);
+        armUnlock();
     }
 }
 /**
@@ -258,16 +281,21 @@ export function play(sound = "chime", options) {
  * first cue of a visit will come from somewhere the browser does not treat
  * as a gesture: a drag library's pointer callbacks, a frame callback, the
  * continuation after an `await`. Behind the same gates as `play()`: a no-op
- * before the first user activation, while disabled, and without Web Audio.
+ * while disabled and without Web Audio; before the first user activation
+ * it waits for the next gesture that counts and starts the context there.
  */
 export function prime() {
-    if (!enabled || !userHasBeenActive())
+    if (!enabled)
         return;
+    if (!userHasBeenActive()) {
+        armUnlock();
+        return;
+    }
     const context = getAudioContext();
     if (!context || context.state === "running")
         return;
     tryResume(context, () => { });
-    armUnlock(context);
+    armUnlock();
 }
 function userHasBeenActive() {
     return typeof navigator === "undefined" || navigator.userActivation?.hasBeenActive !== false;

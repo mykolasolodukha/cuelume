@@ -12,8 +12,10 @@ export declare function setVolume(value: number): void;
 /**
  * Plays a sound immediately. Safe to call from anywhere — lazily creates
  * the shared `AudioContext` on first use, resumes it if the browser
- * started it suspended (e.g. before any user gesture), and is a no-op
- * when Web Audio is unavailable (SSR, old browsers).
+ * started it suspended, and is a no-op when Web Audio is unavailable
+ * (SSR, old browsers). A call the browser blocks — before the first user
+ * activation, or off a gesture's call stack — plays nothing but gets the
+ * context started on the next gesture that counts, so later cues play.
  */
 export declare function play(sound?: SoundName, options?: {
     volume?: number;
@@ -24,6 +26,7 @@ export declare function play(sound?: SoundName, options?: {
  * first cue of a visit will come from somewhere the browser does not treat
  * as a gesture: a drag library's pointer callbacks, a frame callback, the
  * continuation after an `await`. Behind the same gates as `play()`: a no-op
- * before the first user activation, while disabled, and without Web Audio.
+ * while disabled and without Web Audio; before the first user activation
+ * it waits for the next gesture that counts and starts the context there.
  */
 export declare function prime(): void;
