@@ -203,7 +203,7 @@ export function setVolume(value: number): void {
  *
  * WebKit grants a page user activation only for a touch that ends as a tap,
  * never for a pan, and starts a context only while `resume()` runs on the
- * call stack of a `touchend`, `click` or `keydown`. So a first cue played
+ * call stack of a `touchend`, `click`, `keydown` or `mousedown`. So a first cue played
  * from a swipe never passes the activation gate, and one played from a
  * pointer event listener, a frame callback or after an `await` leaves its
  * `resume()` pending; every later `play()` inherits that silence.
@@ -213,11 +213,16 @@ export function setVolume(value: number): void {
  * gesture, creates the shared context there if it does not exist yet, and
  * calls `resume()` on that stack. Any pending promises then settle and the
  * cues queued behind them render. The listeners leave once the context
- * runs.
+ * runs. Capture on `window` runs before any element's own handler, so an
+ * app that stops a click's propagation (say, the click after a drag) does
+ * not starve the unlock. A pen's activation event is `pointerup`; a
+ * stylus browser that synthesizes no `mousedown` or `click` would need it
+ * added here.
  */
 function armUnlock(): void {
   if (disarmUnlock || typeof window === "undefined") return;
   if (typeof window.addEventListener !== "function") return;
+  if (typeof window.removeEventListener !== "function") return;
 
   let watched: AudioContext | null = null;
   const disarm = () => {
@@ -240,9 +245,14 @@ function armUnlock(): void {
   const unlock = () => {
     if (!enabled || !userHasBeenActive()) return;
     const context = getAudioContext();
-    if (!context) return;
+    if (!context) {
+      disarm();
+      return;
+    }
     watch(context);
-    if (context.state === "running") {
+    // Running: nothing left to do. Closed: nothing can be done — a
+    // closed context never resumes, so stop retrying on every gesture.
+    if (context.state === "running" || context.state === "closed") {
       disarm();
       return;
     }
@@ -260,21 +270,33 @@ function armUnlock(): void {
  * resume that lands stands the unlock down. */
 function tryResume(context: AudioContext, then: () => void): void {
   try {
-    void context.resume().then(() => {
-      if (context.state === "running") disarmUnlock?.();
-      then();
-    }, () => {});
+    void context.resume().then(
+      () => {
+        try {
+          if (context.state === "running") disarmUnlock?.();
+          then();
+        } catch {
+          // A render that fails must not surface as an unhandled rejection.
+        }
+      },
+      () => {},
+    );
   } catch {
     // Some browsers throw synchronously when audio is blocked.
   }
 }
 
+function audioContextCtor(): typeof AudioContext | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  );
+}
+
 function getAudioContext(): AudioContext | null {
   if (sharedContext) return sharedContext;
-  if (typeof window === "undefined") return null;
-  const Ctor =
-    window.AudioContext ??
-    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  const Ctor = audioContextCtor();
   if (!Ctor) return null;
   try {
     sharedContext = new Ctor();
@@ -295,7 +317,7 @@ function getAudioContext(): AudioContext | null {
 export function play(sound: SoundName = "chime", options?: { volume?: number }): void {
   if (!enabled || !isSoundName(sound)) return;
   if (!userHasBeenActive()) {
-    armUnlock();
+    if (audioContextCtor()) armUnlock();
     return;
   }
 
@@ -321,7 +343,8 @@ export function play(sound: SoundName = "chime", options?: { volume?: number }):
 
 /**
  * Creates and starts the shared `AudioContext` without playing anything.
- * Call it from a gesture handler (`click`, `touchend`, `keydown`) when the
+ * Call it from a gesture handler (`click`, `touchend`, `keydown`,
+ * `mousedown`) when the
  * first cue of a visit will come from somewhere the browser does not treat
  * as a gesture: a drag library's pointer callbacks, a frame callback, the
  * continuation after an `await`. Behind the same gates as `play()`: a no-op
@@ -331,7 +354,7 @@ export function play(sound: SoundName = "chime", options?: { volume?: number }):
 export function prime(): void {
   if (!enabled) return;
   if (!userHasBeenActive()) {
-    armUnlock();
+    if (audioContextCtor()) armUnlock();
     return;
   }
   const context = getAudioContext();
