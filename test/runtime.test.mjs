@@ -459,9 +459,11 @@ function fakeWindow(AudioContext) {
   };
 }
 
-test("a resume left pending is retried on the next gesture the browser honours", async (context) => {
-  context.after(restoreGlobals);
-  const resumes = [];
+/** A context that renders into stubs; `resume()` is supplied by the test.
+ * `renders()` counts recipes: one master gain per recipe hangs off the
+ * shared output bus and takes the layers' gains (a shimmer's wet gain hangs
+ * off the bus too, but is fed by a filter). */
+function renderingContext(resume) {
   const gains = [];
 
   class AudioNodeStub {
@@ -475,7 +477,7 @@ test("a resume left pending is retried on the next gesture the browser honours",
     disconnect() {}
   }
 
-  class GestureGatedContext {
+  class RenderingContext {
     static instance = null;
     state = "suspended";
     currentTime = 0;
@@ -483,7 +485,7 @@ test("a resume left pending is retried on the next gesture the browser honours",
     destination = new AudioNodeStub();
     stateListeners = [];
     constructor() {
-      GestureGatedContext.instance = this;
+      RenderingContext.instance = this;
     }
     addEventListener(type, listener) {
       if (type === "statechange") this.stateListeners.push(listener);
@@ -492,9 +494,7 @@ test("a resume left pending is retried on the next gesture the browser honours",
       this.stateListeners = this.stateListeners.filter((entry) => entry !== listener);
     }
     resume() {
-      return new Promise((resolve) => {
-        resumes.push(resolve);
-      });
+      return resume(this);
     }
     createGain() {
       const gain = Object.assign(new AudioNodeStub(), { gain: audioParam() });
@@ -525,9 +525,7 @@ test("a resume left pending is retried on the next gesture the browser honours",
       return Object.assign(new AudioNodeStub(), { delayTime: audioParam() });
     }
   }
-  // One master gain per rendered recipe hangs off the shared output bus and
-  // takes the layers' gains; a shimmer's wet gain hangs off the bus too, but
-  // is fed by a filter.
+
   const renders = () =>
     gains.filter(
       (gain, index) =>
@@ -535,6 +533,19 @@ test("a resume left pending is retried on the next gesture the browser honours",
         gain.connections.includes(gains[0]) &&
         gains.some((layer) => layer.connections.includes(gain)),
     ).length;
+
+  return { RenderingContext, renders };
+}
+
+test("a resume left pending is retried on the next gesture the browser honours", async (context) => {
+  context.after(restoreGlobals);
+  const resumes = [];
+  const { RenderingContext: GestureGatedContext, renders } = renderingContext(
+    () =>
+      new Promise((resolve) => {
+        resumes.push(resolve);
+      }),
+  );
 
   const win = fakeWindow(GestureGatedContext);
   setGlobal("setTimeout", () => 0);
@@ -637,4 +648,35 @@ test("a window without listeners and a resume that throws leave play silent", as
   const { play, prime } = await import(`../dist/audio/engine.js?bare=${Date.now()}`);
   assert.doesNotThrow(() => play("chime"));
   assert.doesNotThrow(() => prime());
+});
+
+test("a cue whose resume settles long after it was asked for is dropped", async (context) => {
+  context.after(restoreGlobals);
+  const resumes = [];
+  let now = 10_000;
+  const { RenderingContext: SlowStartContext, renders } = renderingContext(
+    (ctx) =>
+      new Promise((resolve) => {
+        resumes.push(() => {
+          ctx.state = "running";
+          resolve();
+        });
+      }),
+  );
+
+  setGlobal("setTimeout", () => 0);
+  setGlobal("performance", { now: () => now });
+  setGlobal("navigator", { userActivation: { hasBeenActive: true } });
+  setGlobal("window", fakeWindow(SlowStartContext));
+  const { play } = await import(`../dist/audio/engine.js?stale=${Date.now()}`);
+
+  // Asked for long before the context starts: stale, dropped.
+  play("chime");
+  now += 1_001;
+  // Asked for just before the start: plays.
+  play("press");
+  now += 999;
+  for (const resolve of resumes) resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renders(), 1);
 });
