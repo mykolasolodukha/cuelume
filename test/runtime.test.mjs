@@ -441,7 +441,7 @@ test("finished shimmer graphs disconnect after their audible tail", async (conte
 function fakeWindow(AudioContext) {
   const listeners = new Map();
   return {
-    AudioContext,
+    ...(AudioContext ? { AudioContext } : {}),
     listeners,
     addEventListener(type, listener, options) {
       const entries = listeners.get(type) ?? [];
@@ -614,6 +614,7 @@ test("prime creates and resumes the shared context without playing, behind the s
 
   prime();
   assert.equal(constructions, 0);
+  assert.equal(win.listeners.size, 4);
 
   userActivation.hasBeenActive = true;
   setEnabled(false);
@@ -729,4 +730,129 @@ test("a play blocked before activation starts the context on the first tap that 
   win.emit("click");
   assert.equal(constructions, 1);
   assert.equal(resumes, 1);
+});
+
+test("an armed unlock waits out a disabled stretch and a context born running", async (context) => {
+  context.after(restoreGlobals);
+  let constructions = 0;
+  let resumes = 0;
+  const userActivation = { hasBeenActive: false };
+
+  class RunningContext {
+    state = "running";
+    constructor() {
+      constructions++;
+    }
+    resume() {
+      resumes++;
+      return Promise.resolve();
+    }
+  }
+
+  const win = fakeWindow(RunningContext);
+  setGlobal("navigator", { userActivation });
+  setGlobal("window", win);
+  const { play, setEnabled } = await import(`../dist/audio/engine.js?disabled=${Date.now()}`);
+
+  play("chime");
+  assert.equal(win.listeners.size, 4);
+
+  // Sound switched off while armed: a tap creates nothing, listeners stay.
+  userActivation.hasBeenActive = true;
+  setEnabled(false);
+  win.emit("click");
+  assert.equal(constructions, 0);
+  assert.equal(win.listeners.size, 4);
+
+  // Switched on again: the next tap creates the context; born running,
+  // it needs no resume and the unlock stands down at once.
+  setEnabled(true);
+  win.emit("keydown");
+  assert.equal(constructions, 1);
+  assert.equal(resumes, 0);
+  assert.equal(win.listeners.size, 0);
+});
+
+test("a window that cannot remove listeners is never armed", async (context) => {
+  context.after(restoreGlobals);
+  let added = 0;
+
+  class SuspendedContext {
+    state = "suspended";
+    resume() {
+      return new Promise(() => {});
+    }
+  }
+
+  setGlobal("navigator", { userActivation: { hasBeenActive: false } });
+  setGlobal("window", {
+    AudioContext: SuspendedContext,
+    addEventListener() {
+      added++;
+    },
+  });
+  const { play, prime } = await import(`../dist/audio/engine.js?noremove=${Date.now()}`);
+  assert.doesNotThrow(() => play("chime"));
+  assert.doesNotThrow(() => prime());
+  assert.equal(added, 0);
+});
+
+test("without Web Audio a blocked play arms nothing", async (context) => {
+  context.after(restoreGlobals);
+  const win = fakeWindow(undefined);
+  setGlobal("navigator", { userActivation: { hasBeenActive: false } });
+  setGlobal("window", win);
+  const { play, prime } = await import(`../dist/audio/engine.js?noaudio=${Date.now()}`);
+  play("chime");
+  prime();
+  assert.equal(win.listeners.size, 0);
+});
+
+test("the unlock survives a refused resume and lands on a later mousedown", async (context) => {
+  context.after(restoreGlobals);
+  let attempts = 0;
+  const { RenderingContext: ReluctantContext, renders } = renderingContext((ctx) => {
+    attempts++;
+    if (attempts < 3) return Promise.reject(new Error("not yet"));
+    ctx.state = "running";
+    return Promise.resolve();
+  });
+
+  const win = fakeWindow(ReluctantContext);
+  setGlobal("setTimeout", () => 0);
+  setGlobal("navigator", { userActivation: { hasBeenActive: true } });
+  setGlobal("window", win);
+  const { play, prime } = await import(`../dist/audio/engine.js?refused=${Date.now()}`);
+
+  // A prime() off the gesture stack: refused, armed.
+  prime();
+  assert.equal(attempts, 1);
+  assert.equal(win.listeners.size, 4);
+
+  // A gesture the browser still refuses keeps the arm up.
+  win.emit("touchend");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2);
+  assert.equal(win.listeners.size, 4);
+
+  // The next mousedown lands; nothing was queued, so nothing renders.
+  win.emit("mousedown");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 3);
+  assert.equal(win.listeners.size, 0);
+  assert.equal(renders(), 0);
+
+  // A second cycle: the context gets suspended again, a cue re-arms once,
+  // and the next gesture tears it all down again, context listener included.
+  const ctx = ReluctantContext.instance;
+  ctx.state = "suspended";
+  play("chime");
+  play("press");
+  assert.equal(win.listeners.size, 4);
+  assert.equal(ctx.stateListeners.length, 1);
+  win.emit("keydown");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(win.listeners.size, 0);
+  assert.equal(ctx.stateListeners.length, 0);
+  assert.equal(renders(), 2);
 });
