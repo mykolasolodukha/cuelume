@@ -123,6 +123,13 @@ let globalVolume = 1;
 let disarmUnlock = null;
 /** The gestures every engine accepts as a reason to start audio. */
 const UNLOCK_EVENTS = ["touchend", "click", "keydown", "mousedown"];
+/** A cue still waiting on the context this long after it was asked for is
+ * dropped: feedback belongs to the act that just landed, and a backlog
+ * released by a later gesture would burst out as noise. */
+const STALE_CUE_MS = 1000;
+function now() {
+    return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
 function normalizeVolume(value, fallback) {
     return typeof value === "number" && Number.isFinite(value)
         ? Math.min(1, Math.max(0, value))
@@ -234,9 +241,13 @@ export function play(sound = "chime", options) {
         renderRecipe(context, recipe, playVolume);
     }
     else {
+        const askedAt = now();
         tryResume(context, () => {
-            if (enabled && context.state === "running")
-                renderRecipe(context, recipe, playVolume);
+            if (!enabled || context.state !== "running")
+                return;
+            if (now() - askedAt > STALE_CUE_MS)
+                return;
+            renderRecipe(context, recipe, playVolume);
         });
         armUnlock(context);
     }
